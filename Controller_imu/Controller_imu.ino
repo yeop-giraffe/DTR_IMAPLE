@@ -47,11 +47,12 @@ GamepadPtr myGamepads[BP32_MAX_GAMEPADS];
 Adafruit_MotorShield AFMS = Adafruit_MotorShield();
 Adafruit_DCMotor *motorRB = AFMS.getMotor(4);  // left front motor
 Adafruit_DCMotor *motorLB = AFMS.getMotor(3);  // right front motor
+Adafruit_DCMotor *motorCapture = AFMS.getMotor(1);  // capture motor
 
 Adafruit_MotorShield AFMS2 = Adafruit_MotorShield(0x61);
 Adafruit_DCMotor *motorLF = AFMS2.getMotor(3);  // right back motor 
 Adafruit_DCMotor *motorRF = AFMS2.getMotor(4);  // left back motor
-Adafruit_DCMotor *motorCapture = AFMS2.getMotor(1);  // capture motor
+
 
 //////// Define global variables ////////////
 float turn = 0; // positive = right, negative = left
@@ -64,8 +65,12 @@ float alt;
 float target_yaw = 0;
 float target_alt = 0;
 
+float previous_yaw = 0;
+
+
 float alt_p_error = 0;
 float yaw_p_error = 0;
+float yaw_d_error = 0;
 
 int powerLF; //#1
 int powerRF; //#2
@@ -82,6 +87,7 @@ int rightJoystickY; // (-511 - 512) right Y axis
 // sensors_event_t temp_event, pressure_event;
 
 bool was_turning = false;
+bool is_autonomous = false;
 
 //////// Define constants ////////////
 #define CATCHSPEED 250
@@ -190,7 +196,7 @@ void quaternionToEulerGI(sh2_GyroIntegratedRV_t* rotational_vector, euler_t* ypr
 
 float imu(){
   if (bno08x.wasReset()) {
-    // Serial.print("sensor was reset ");
+    Serial.print("sensor was reset ");
     setReports(reportType, reportIntervalUs);
   }
   
@@ -235,19 +241,32 @@ float imu(){
 
 float Calculate_PID_Error(){
   float Kp_alt = 5000;
-  float Kp_yaw = 6;
+  float Kp_yaw = 8;
+  float Kd_yaw = 150;
+
+  float error = target_yaw - (ypr.yaw-yaw_init);
 
   // alt_p_error = Kp_alt*((pressure_event.pressure-alt_init)-target_alt); // - barometer
-
-  if (target_yaw - (ypr.yaw-yaw_init) > 180){
-    yaw_p_error = -Kp_yaw*(target_yaw - (ypr.yaw-yaw_init) - 360);
-  } else if (target_yaw - (ypr.yaw-yaw_init) < -180){
-    yaw_p_error = -Kp_yaw*(target_yaw - (ypr.yaw-yaw_init) + 360);
+  // P_control
+  if (error > 180){
+    yaw_p_error = -Kp_yaw*(error - 360);
+    yaw_d_error = Kd_yaw * (error-previous_yaw);
+    previous_yaw = error - 360;
+  } else if (error < -180){
+    yaw_p_error = -Kp_yaw*(error + 360);
+    yaw_d_error = Kd_yaw * (error-previous_yaw);
+    previous_yaw = error + 360;
   } else{
-    yaw_p_error = -Kp_yaw*(target_yaw - (ypr.yaw-yaw_init));
+    yaw_p_error = -Kp_yaw*(error);
+    yaw_d_error = Kd_yaw * (error-previous_yaw);
+    previous_yaw = error;
   }
 
-  return yaw_p_error;
+  // D_control
+  // yaw_d_error = Kd_yaw * ((target_yaw - (ypr.yaw-yaw_init))-previous_yaw);
+  // previous_yaw = target_yaw - (ypr.yaw-yaw_init);
+
+  return yaw_p_error, yaw_d_error;
 }
 
 // Arduino setup function. Runs in CPU 1
@@ -330,7 +349,7 @@ void loop() {
   // Just call this function in your main loop.
   // The gamepads pointer (the ones received in the callbacks) gets updated
   // automatically.
-  // delay(1);
+  delay(1);
   BP32.update();
 
   // It is safe to always do this before using the gamepad API.
@@ -353,7 +372,7 @@ void loop() {
 
       // Altitude control
       if (Throttlebutton > 30){
-        target_alt += Throttlebutton/600;
+        target_alt += Throttlebutton/300;
         if (target_alt > 250) {
           target_alt = 250;
         } else if (target_alt < -250){
@@ -362,7 +381,7 @@ void loop() {
       }
 
       if (Brakebutton > 30){
-        target_alt -= Brakebutton/600;
+        target_alt -= Brakebutton/300;
         if (target_alt > 250) {
           target_alt = 250;
         } else if (target_alt < -250){
@@ -391,7 +410,7 @@ void loop() {
         turn = yaw_p_error;
       }
 
-      turn = yaw_p_error;
+      turn = yaw_p_error + yaw_d_error;
 
       // turn = yaw_p_error;
       
@@ -402,11 +421,11 @@ void loop() {
         forward = 0;
       }
 
-      if ( forward > 200){
-        forward = 200;
+      if ( forward > 250){
+        forward = 250;
       } 
-      if ( forward < -200){
-        forward = -200;
+      if ( forward < -250){
+        forward = -250;
       }
       
       // Kill altitude
@@ -414,11 +433,16 @@ void loop() {
         target_alt = 0;
       }
 
-      if ( turn > 200){
-        turn = 200;
+      if ( turn > 250){
+        turn = 250;
       } 
-      if ( turn < -200){
-        turn = -200;
+      if ( turn < -250){
+        turn = -250;
+      }
+
+      // Turn in circles for autonomous
+      if (myGamepad->a()){
+        turn = 200;
       }
 
       powerLF = target_alt + turn + forward; //#1
@@ -426,10 +450,10 @@ void loop() {
       powerLB = target_alt - turn - forward; //#4
       powerRB = target_alt + turn - forward; //#3
 
-      motorLF->setSpeed(constrain(abs(powerLF), 0, 240));
-      motorRF->setSpeed(constrain(abs(powerRF), 0, 240));
-      motorLB->setSpeed(constrain(abs(powerLB), 0, 240));
-      motorRB->setSpeed(constrain(abs(powerRB), 0, 240));
+      motorLF->setSpeed(constrain(abs(powerLF), 0, 250));
+      motorRF->setSpeed(constrain(abs(powerRF), 0, 250));
+      motorLB->setSpeed(constrain(abs(powerLB), 0, 250));
+      motorRB->setSpeed(constrain(abs(powerRB), 0, 250));
 
       if (powerLF > 0){
         motorLF->run(BACKWARD);
@@ -465,10 +489,10 @@ void loop() {
       if (myGamepad->b()){
         catchState = 2;
       }
-      // Hold
-      if (myGamepad->l1()){
-        catchState = 3;
-      }
+      // // Hold
+      // if (myGamepad->l1()){
+      //   catchState = 3;
+      // }
       // Neutral
       if (myGamepad->a()){
         catchState = 0;
@@ -487,14 +511,14 @@ void loop() {
           break;
 
         case 2: // Release
-          motorCapture->setSpeed(CATCHSPEED/3);
+          motorCapture->setSpeed(CATCHSPEED);
           motorCapture->run(FORWARD);
           break;
 
-        case 3: // Hold
-          motorCapture->setSpeed(CATCHSPEED/2);
-          motorCapture->run(BACKWARD);
-          break;
+        // case 3: // Hold
+        //   motorCapture->setSpeed(CATCHSPEED/2);
+        //   motorCapture->run(BACKWARD);
+        //   break;
       }
 
 
@@ -527,7 +551,12 @@ void loop() {
   Serial.print(" | ");
   Serial.print(turn);
   Serial.print(" | ");
-  Serial.println(forward);
+  Serial.print(forward);
+  Serial.print(" | ");
+  Serial.print(" | ");
+  Serial.print(yaw_p_error);
+  Serial.print(" | ");
+  Serial.println(yaw_d_error);
   
 
 

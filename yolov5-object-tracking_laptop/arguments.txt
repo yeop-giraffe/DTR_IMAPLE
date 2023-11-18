@@ -1,0 +1,1 @@
+python obj_det_and_trk.py --weights dtr.pt --source 0 --view-img --save-txt
